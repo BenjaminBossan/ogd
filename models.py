@@ -3,7 +3,7 @@
 FTRL proximal according to: McMahan et al. 2013:
 Ad click prediction: a view from the trenches.
 
-'Criteo' model adapted from Sam Hocevar's:
+'OGDLR' model adapted from Sam Hocevar's:
 https://www.kaggle.com/c/criteo-display-ad-challenge/forums/t/10322/beat-the-benchmark-with-less-then-200mb-of-memory
 
 """
@@ -63,14 +63,8 @@ class OGDLR(object):
         -- McMahan et al.
 
         """
-        if lambda1 != 0:
-            print("Warning L1 regularization not yet implemented for"
-                  "OGDLR.")
-        if lambda2 != 0:
-            print("Warning L2 regularization not yet implemented for"
-                  "OGDLR.")
-        self.lambda1 = 0
-        self.lambda2 = 0
+        self.lambda1 = lambda1
+        self.lambda2 = lambda2
         self.alpha = alpha
         self.ndims = ndims
         self.alr_schedule = alr_schedule
@@ -144,17 +138,31 @@ class OGDLR(object):
             raise TypeError("Do not know adaptive learning"
                             "rate schedule %s" % self.alr_schedule)
 
-    def _update(self, wt, xt, pt, yt, class_weight):
+    def _get_grads(self, yt, pt, wt):
+        # Get the gradient as a function of true value and predicted
+        # probability, as well as the regularization terms. The 
+        # gradient is the derivative of the cost function with
+        # respect to each wi.
+        y_err = pt - yt
+        grads = [y_err + self._get_regularization(wi) for wi in wt]
+        return grads
+
+    def _get_regularization(self, wi):
+        # get cost from L1 and L2 regularization
+        cost = self.lambda1 * np.sign(wi)  # L1
+        cost += 2 * self.lambda2 * wi  # L2
+        return cost
+
+    def _update(self, wt, xt, gradt, sample_weight):
         # note: wt is not used here but is still passed so that the
         # interface for FTRL proximal (which requires wt) can stay the
         # same
-        grad = (pt - yt) / class_weight
-        grad_sq = grad * grad
         numt = self._get_num(xt)
-        delta_num = self._get_delta_num(grad_sq)
-        for xi, numi in zip(xt, numt):
-            delta_w = grad * self.alpha / (1 + np.sqrt(numi))
+        for xi, numi, gradi in zip(xt, numt, gradt):
+            delta_w = gradi * self.alpha / (1 + np.sqrt(numi)) 
+            delta_w /= sample_weight
             self.w[xi] = self.w.get(xi, 0.) - delta_w
+            delta_num = self._get_delta_num(gradi * gradi)
             self.num[xi] = numi + delta_num
         return self
 
@@ -229,7 +237,8 @@ class OGDLR(object):
             xt = self._get_x(X[t])
             wt = self._get_w(xt)
             pt = self._get_p(xt, wt)
-            self._update(wt, xt, pt, yt, sample_weight)
+            gradt = self._get_grads(yt, pt, wt)
+            self._update(wt, xt, gradt, sample_weight)
             self.valid_history.append((yt, pt))
             self._call_back(t)
 
@@ -272,17 +281,17 @@ class OGDLR(object):
         y_pred = (pt > 0.5).astype(int)
         return y_pred
 
-    def _cost_function(self, wt, y, epsilon):
-        # Calculate the cost function.
-        wt_eps = [w + epsilon for w in wt]
-        pt = self._get_p(0, wt_eps)
-        # pt = self._get_p(0, wt)
-        J = logloss([y], [pt])
-        l1 = self.lambda1 * np.linalg.norm(wt_eps, 1)
-        l2 = self.lambda2 * np.linalg.norm(wt_eps, 2)
-        return J + l1 + l2
+    def _cost_function(self, wt, y):
+        pt = self._get_p(0, wt)
+        ll = logloss([y], [pt])
+        J = []
+        for wi in wt:
+            l1 = self.lambda1 * np.abs(wi)
+            l2 = self.lambda2 * wi * wi
+            J.append(ll + l1 + l2)
+        return J
 
-    def numerical_grad(self, x, y, epsilon=1e-6):
+    def numerical_grad(self, x, y, epsilon=1e-9):
         """Calculate the gradient and the gradient determined
         numerically; they should be very close.
 
@@ -315,15 +324,21 @@ class OGDLR(object):
           The gradient as determined numerically.
 
         """
+        # analytic
         xt = self._get_x(x)
         wt = self._get_w(xt)
         pt = self._get_p(0, wt)
-        # analytic
-        grad = pt - y
-        # numeric
-        cost_me = self._cost_function(wt, y, -epsilon)
-        cost_pe = self._cost_function(wt, y, epsilon)
-        grad_num = (cost_pe - cost_me) / 2 / epsilon / len(wt)
+        grad = self._get_grads(y, pt, wt)
+        
+        # numeric: vary each wi
+        grad_num = []
+        for i in range(len(wt)):
+            wt_pe, wt_me = wt[:], wt[:]
+            wt_pe[i] += epsilon
+            wt_me[i] -= epsilon
+            cost_pe = self._cost_function(wt_pe, y)[i]
+            cost_me = self._cost_function(wt_me, y)[i]
+            grad_num.append((cost_pe - cost_me) / 2 / epsilon)
         return grad, grad_num
 
     def keys(self):
@@ -427,9 +442,16 @@ class FTRLprox(OGDLR):
                 wi = (np.sign(wi) * self.lambda1 - wi) / temp
                 wt.append(wi)
         return wt
+        
+    def _get_grads(self, yt, pt, wt):
+        # Get the gradient as a function of true value and predicted
+        # probability. Regularization does not apply here since it is
+        # realized differently for FTRLprox, but 'wt' is still passed
+        # for consistency.
+        y_err = pt - yt
+        return y_err
 
-    def _update(self, wt, xt, pt, yt, class_weight):
-        grad = (pt - yt) / class_weight
+    def _update(self, wt, xt, grad, sample_weight):
         grad_sq = grad * grad
         numt = self._get_num(xt)
         delta_num = self._get_delta_num(grad_sq)
@@ -437,7 +459,7 @@ class FTRLprox(OGDLR):
             new_num = numi + delta_num
             # sigma = 1/eta(t) - 1/eta(t-1)
             sigma = (np.sqrt(new_num) - np.sqrt(numi)) / self.alpha
-            delta_w = wi * sigma - grad
+            delta_w = (wi * sigma - grad) / sample_weight
             self.w[xi] = self.w.get(xi, 0.) - delta_w
             self.num[xi] = new_num
         return self

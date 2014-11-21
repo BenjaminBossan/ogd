@@ -26,10 +26,6 @@ def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 
-def bla(x):
-    return x
-
-
 class GetList(list):
     """Allows lists to be interfaced with get as dicts would be.
 
@@ -81,9 +77,8 @@ class PlotLogloss(object):
         plt.plot(x_ax, ll, 'k.-')
 
         if not self._fig_is_init:
-            plt.legend()
+            plt.legend(loc='best')
             self._fig_is_init = True
-        plt.pause(0.0001)
 
 
 class PlotWeightChange(object):
@@ -121,6 +116,5 @@ class PlotWeightChange(object):
         plt.plot([self.x_ax[0], self.x_ax[-1]], [0, 0], 'k--', label='zero')
 
         if not self._fig_is_init:
-            plt.legend()
+            plt.legend(loc='best')
             self._fig_is_init = True
-        plt.pause(0.0001)

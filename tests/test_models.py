@@ -5,7 +5,6 @@ from __future__ import division
 from itertools import permutations
 from mock import MagicMock
 from mock import patch
-import string
 
 import numpy as np
 import pytest
@@ -16,105 +15,16 @@ from FTRLprox.models import OGDLR
 from FTRLprox.models import SEED
 from FTRLprox.utils import logloss
 from FTRLprox.utils import GetList
-
-
-def create_training_data(n=10000):
-    """Create random 'golf' data.
-
-    Probability of golfing is higher if weather is sunny and
-    temperature is warm. Add a random noise feature.
-
-    """
-    weather = np.random.choice(['rainy', 'sunny'], n, p=[0.3, 0.7])
-    temperature = np.random.choice(['warm', 'cold'], n, p=[0.4, 0.6])
-    letters = [c for c in string.ascii_lowercase]
-    noise_features = [''.join(np.random.choice(letters, 3))
-                      for __ in range(100)]
-    noise = np.random.choice(noise_features, n)
-    X = np.array([weather, temperature, noise]).T
-    y = np.zeros(n)
-    for i in range(n):
-        pr1 = 0.5 * np.random.rand() if X[i, 0] == 'sunny' else 0
-        pr2 = 0.5 * np.random.rand() if X[i, 1] == 'warm' else 0
-        pr3 = np.random.rand()
-        y[i] = 1 if pr1 + pr2 + pr3 > 0.95 else 0
-    return X, y
-
-
-# generate data and various models
-N = 10000
-X, y = create_training_data(n=N)
-COLS = ['weather', 'temperature', 'noise']
-LAMBDA1 = 0
-LAMBDA2 = 0
-ALPHA = 0.1
-NDIMS = 2 ** 20
-
-ogdlr_before = OGDLR(lambda1=LAMBDA1, alpha=ALPHA, alr_schedule='constant')
-ogdlr_before.fit(X[:10], y[:10], COLS)
-
-ogdlr_after = OGDLR(lambda1=LAMBDA1, alpha=ALPHA, alr_schedule='constant')
-ogdlr_after.fit(X, y, COLS)
-
-ftrl_before = FTRLprox(lambda1=LAMBDA1, lambda2=LAMBDA2, alpha=ALPHA, beta=1,
-                       alr_schedule='constant')
-ftrl_before.fit(X[:10], y[:10], COLS)
-
-ftrl_after = FTRLprox(lambda1=LAMBDA1, lambda2=LAMBDA2, alpha=ALPHA, beta=1,
-                      alr_schedule='constant')
-ftrl_after.fit(X, y, COLS)
-
-hash_before = OGDLR(lambda1=LAMBDA1, alpha=ALPHA,
-                    alr_schedule='constant', ndims=NDIMS)
-hash_before.fit(X[:10], y[:10], COLS)
-
-hash_after = OGDLR(lambda1=LAMBDA1, alpha=ALPHA,
-                   alr_schedule='constant', ndims=NDIMS)
-hash_after.fit(X, y, COLS)
-
-
-def test_FTRL_learns():
-    # test that this model learns something
-    y_pred = ftrl_before.predict_proba(X)
-    ll_before = logloss(y, y_pred)
-
-    y_pred = ftrl_after.predict_proba(X)
-    ll_after = logloss(y, y_pred)
-
-    assert ll_before > ll_after
-
-
-def test_ogdlr_learns():
-    # test that this model learns something
-    y_pred = ogdlr_before.predict_proba(X)
-    ll_before = logloss(y, y_pred)
-
-    y_pred = ogdlr_after.predict_proba(X)
-    ll_after = logloss(y, y_pred)
-
-    assert ll_before > ll_after
-
-
-def test_ogdlr_with_hash_learns():
-    # test that this model learns something
-    y_pred = hash_before.predict_proba(X)
-    ll_before = logloss(y, y_pred)
-
-    y_pred = hash_after.predict_proba(X)
-    ll_after = logloss(y, y_pred)
-
-    assert ll_before > ll_after
-
-
-def test_models_same_predictions():
-    # for lambda1, lambda2 = 0, OGDLR and FTRLprox should generate the
-    # same result. The same goes if hashing is used (except for the
-    # rare case of hash collisions.
-    y_f = ftrl_after.predict(X)
-    y_o = ogdlr_after.predict(X)
-    y_h = hash_after.predict(X)
-    assert sum(y_f != y_o) == 0
-    assert sum(y_f != y_h) == 0
+from tutils import ftrl_after
+from tutils import ftrl_before
+from tutils import hash_after
+from tutils import hash_before
+from tutils import ogdlr_after
+from tutils import ogdlr_before
+from tutils import N
+from tutils import NDIMS
+from tutils import X
+from tutils import y
 
 
 def test_keys_dictionary():
@@ -154,53 +64,44 @@ def test_ogdlr_grad_numerically(alr):
     clf = OGDLR(alr_schedule=alr)
     clf.fit(X[:100], y[:100])
     for xx, yy in zip(X[:10], y[:10]):
-        grad, grad_num = ogdlr_after.numerical_grad(xx, yy, epsilon)
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
         assert np.allclose(grad, grad_num, atol=epsilon)
 
 
 @pytest.mark.parametrize('lambda1', [0, 0.1, 1, 10, 100])
-def test_ogdlr_grad_numerically(lambda1):
+def test_ogdlr_grad_numerically_l1(lambda1):
     epsilon = 1e-6
     clf = OGDLR(lambda1=lambda1)
     clf.fit(X[:100], y[:100])
     for xx, yy in zip(X[:10], y[:10]):
-        grad, grad_num = ogdlr_after.numerical_grad(xx, yy, epsilon)
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
         assert np.allclose(grad, grad_num, atol=epsilon)
 
 
-# @pytest.mark.parametrize(
-#     'args',
-#     list(set(permutations(3 * [0] + 3 * [0.5] + 3 * [2], 3)))
-# )
-# def test_ftrl_grad_numerically_alpha002(args):
-#     # test all combinations of lambda1, lambda2, beta values of 0,
-#     # 0.5, and 2 and for alpha = 0.02. alpha is not part of the list
-#     # since it is not allowed to be 0.
-#     epsilon = 1e-6
-#     clf = FTRLprox(args[0], args[1], 0.02, args[2])
-#     clf.fit(X[:100], y[:100])
-#     close = []
-#     for xx, yy in zip(X[:10], y[:10]):
-#         grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
-#         close.append(np.allclose(grad, grad_num, atol=epsilon))
-#     assert all(close)
+@pytest.mark.parametrize('lambda2', [0, 0.1, 1, 10, 100])
+def test_ogdlr_grad_numerically_l2(lambda2):
+    epsilon = 1e-6
+    clf = OGDLR(lambda2=lambda2)
+    clf.fit(X[:100], y[:100])
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
+        
 
-
-# @pytest.mark.parametrize(
-#     'args',
-#     list(set(permutations(3 * [0] + 3 * [0.5] + 3 * [2], 3)))
-# )
-# def test_ftrl_grad_numerically_alpha1(args):
-#     # test all combinations of lambda1, lambda2, beta values of 0,
-#     # 0.5, and 2 and for alpha = 1.
-#     epsilon = 1e-6
-#     clf = FTRLprox(args[0], args[1], 1, args[2])
-#     clf.fit(X[:100], y[:100])
-#     close = []
-#     for xx, yy in zip(X[:10], y[:10]):
-#         grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
-#         close.append(np.allclose(grad, grad_num, atol=epsilon))
-#     assert all(close)
+@pytest.mark.parametrize('args',
+    list(set(permutations(2 * [0] + 2 * [1e-4] + 2 * [1e-2] + 2 * [1], 2)))
+)
+def test_ogdlr_grad_numerically_l1_l2(args):
+    # test all combinations of lambda1, lambda2, beta values of 0,
+    # 0.5, and 2 and for alpha = 0.02. alpha is not part of the list
+    # since it is not allowed to be 0.
+    epsilon = 1e-6
+    clf = OGDLR(*args)
+    clf.fit(X[:100], y[:100])
+    close = []
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
 
 
 @pytest.mark.parametrize('arg, expected', [
