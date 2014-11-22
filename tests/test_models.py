@@ -86,15 +86,14 @@ def test_ogdlr_grad_numerically_l2(lambda2):
     for xx, yy in zip(X[:10], y[:10]):
         grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
         assert np.allclose(grad, grad_num, atol=epsilon)
-        
+
 
 @pytest.mark.parametrize('args',
     list(set(permutations(2 * [0] + 2 * [1e-4] + 2 * [1e-2] + 2 * [1], 2)))
 )
 def test_ogdlr_grad_numerically_l1_l2(args):
-    # test all combinations of lambda1, lambda2, beta values of 0,
-    # 0.5, and 2 and for alpha = 0.02. alpha is not part of the list
-    # since it is not allowed to be 0.
+    # test all combinations of lambda1 and lambda2 values of 0,
+    # 0.5, and 2 and for alpha = 0.02 and beta = 1.
     epsilon = 1e-6
     clf = OGDLR(*args)
     clf.fit(X[:100], y[:100])

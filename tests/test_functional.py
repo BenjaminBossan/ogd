@@ -2,6 +2,7 @@
 
 from __future__ import division
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -64,34 +65,54 @@ def test_models_same_predictions():
 
 
 def test_effect_of_alpha():
-    # higher alpha should lead to slower learning
+    # higher alpha should lead to faster learning, thus higher weights
     mean_abs_weights = []
     for alpha in [0, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1]:
         clf = OGDLR(alpha=alpha)
         clf.fit(X[:100], y[:100])
         mean_abs_weights.append(np.abs(clf.weights()).mean())
+    assert mean_abs_weights[0] == 0.
     assert all(np.diff(mean_abs_weights) > 0)
 
 
-@pytest.mark.parametrize('lambda1_0, lambda1_1', [
-    (0, 1e-3),
-    (1e-3, 1e-2),
-    (1e-2, 1e-1),
-    (1e-1, 1e0),
-    (1e0, 1e1),
-    (1e1, 1e2),
-    (1e2, 1e3),
-])
-def test_effect_lambda1(lambda1_0, lambda1_1):
-    # higher lambda1 should lead to absolutely lower weights
-    clf0 = OGDLR(lambda1=lambda1_0)
-    clf0.fit(X[:100], y[:100])
-    w0 = clf0.weights()
-    clf1 = OGDLR(lambda1=lambda1_1)
-    clf1.fit(X[:100], y[:100])
-    w1 = clf1.weights()
-    diff_weights = []
-    for key in clf0.keys():
-        diff_weights.append(clf0.w[key] - clf1.w[key])
-    # import pdb; pdb.set_trace()
-        
+def test_effect_of_beta():
+    # higher beta should lead to slower learning, thus lower weights
+    mean_abs_weights = []
+    for beta in [10 ** n for n in range(7)]:
+        clf = OGDLR(beta=beta)
+        clf.fit(X[:100], y[:100])
+        mean_abs_weights.append(np.abs(clf.weights()).mean())
+    assert np.allclose(mean_abs_weights[-1], 0, atol=1e-6)
+    assert all(np.diff(mean_abs_weights) < 0)
+
+
+@pytest.mark.parametrize('lambda1', [1 / lam for lam in range(1, 6)])
+def test_effect_of_lambda1(lambda1):
+    # gradients should be the same regardless of magnitude of weights
+    weights = range(-5, 0) + range(1, 6)
+    clf = OGDLR(lambda1=lambda1)
+    grads = clf._get_grads(0, 0, weights)
+    # gradient only depends on sign of weight
+    abso = [gr * np.sign(w) for gr, w in zip(grads, weights)]
+    assert np.allclose(abso[0], abso)
+
+    # contingency test: should fail
+    frac = [gr / w for gr, w in zip(grads, weights)]
+    with pytest.raises(AssertionError):
+        assert np.allclose(frac[0], frac)
+
+
+@pytest.mark.parametrize('lambda2', [1 / lam for lam in range(1, 6)])
+def test_effect_of_lambda2(lambda2):
+    # relative difference in gradients should be the same
+    weights = range(-5, 0) + range(1, 6)
+    clf = OGDLR(lambda2=lambda2)
+    grads = clf._get_grads(0, 0, weights)
+    # gradient only depends on sign of weight
+    frac = [gr / w for gr, w in zip(grads, weights)]
+    assert np.allclose(frac[0], frac)
+
+    # contingencey test: should fail
+    abso = [gr * np.sign(w) for gr, w in zip(grads, weights)]
+    with pytest.raises(AssertionError):
+        assert np.allclose(abso[0], abso)

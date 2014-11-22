@@ -38,6 +38,7 @@ class OGDLR(object):
                  lambda1=0.,
                  lambda2=0.,
                  alpha=0.02,
+                 beta=1.,
                  ndims=None,
                  alr_schedule='gradient',
                  callback=None,
@@ -47,7 +48,8 @@ class OGDLR(object):
         ----------
         * lambda1 (float, default: 1.): L1 regularization factor
         * lambda2 (float, default: 0.): L2 regularization factor
-        * alpha (float, default: 0.02): scales learning rate
+        * alpha (float, default: 0.02): scales learning rate up
+        * beta (float, default: 1.): scales learning rate down
         * ndims (int, default: None): Max number of dimensions (use array),
           if None, no max (use dict)
         * alr_schedule (string, {'gradient' (default), 'count', 'constant'}):
@@ -60,12 +62,15 @@ class OGDLR(object):
         Notes on parameter choice:
         * alpha must be greater 0.
         * "The optimal value of alpha can vary a fair bit..."
+        * "beta=1 is usually good enough; this simply ensures that early
+        learning rates are not too high"
         -- McMahan et al.
 
         """
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.alpha = alpha
+        self.beta = beta
         self.ndims = ndims
         self.alr_schedule = alr_schedule
         self.callback = callback
@@ -153,19 +158,6 @@ class OGDLR(object):
         cost += 2 * self.lambda2 * wi  # L2
         return cost
 
-    def _update(self, wt, xt, gradt, sample_weight):
-        # note: wt is not used here but is still passed so that the
-        # interface for FTRL proximal (which requires wt) can stay the
-        # same
-        numt = self._get_num(xt)
-        for xi, numi, gradi in zip(xt, numt, gradt):
-            delta_w = gradi * self.alpha / (1 + np.sqrt(numi)) 
-            delta_w /= sample_weight
-            self.w[xi] = self.w.get(xi, 0.) - delta_w
-            delta_num = self._get_delta_num(gradi * gradi)
-            self.num[xi] = numi + delta_num
-        return self
-
     def _get_skip_sample(self, class_weight, y):
         if class_weight == 'auto':
             class_weight = np.mean(y) / (1 - np.mean(y))
@@ -187,6 +179,19 @@ class OGDLR(object):
                 (t != 0)
         ):
             self.callback.plot(self)
+
+    def _update(self, wt, xt, gradt, sample_weight):
+        # note: wt is not used here but is still passed so that the
+        # interface for FTRL proximal (which requires wt) can stay the
+        # same
+        numt = self._get_num(xt)
+        for xi, numi, gradi in zip(xt, numt, gradt):
+            delta_w = gradi * self.alpha / (self.beta + np.sqrt(numi)) 
+            delta_w /= sample_weight
+            self.w[xi] = self.w.get(xi, 0.) - delta_w
+            delta_num = self._get_delta_num(gradi * gradi)
+            self.num[xi] = numi + delta_num
+        return self
 
     def fit(self, X, y, cols=None, class_weight=1.):
         """Fit OGDLR model.
@@ -400,8 +405,8 @@ class FTRLprox(OGDLR):
         ----------
         * lambda1 (float, default: 1.): L1 regularization factor
         * lambda2 (float, default: 0.): L2 regularization factor
-        * alpha (float, default: 0.02): scales learning rate
-        * beta (float, default: 1.): scales learning rate
+        * alpha (float, default: 0.02): scales learning rate up
+        * beta (float, default: 1.): scales learning rate down
         * ndims (int, default: None): Max number of dimensions (use array),
           if None, no max (use dict)
         * alr_schedule (string, {'gradient' (default), 'count', 'constant'}):
