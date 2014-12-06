@@ -77,18 +77,21 @@ class OGDLR(object):
         self.callback_period = callback_period
         self.verbose = verbose
 
-    def _initialize(self, X, cols):
-        """Initialize some required attributes on first call.
-        """
-        n, m = X.shape
+    def _initialize_dicts(self):
         # weights and number of iterations (more or less) for adaptive
         # learning rate
-        if self.ndims is None:
-            self.w = {}
-            self.num = {}
-        else:
-            self.w = GetList([0.] * self.ndims)
-            self.num = GetList([0.] * self.ndims)
+        self.w = {}
+        self.num = {}
+
+    def _initialize_lists(self):
+        # weights and number of iterations (more or less) for adaptive
+        # learning rate
+        self.w = GetList([0.] * self.ndims)
+        self.num = GetList([0.] * self.ndims)
+
+    def _initialize_cols(self, X, cols):
+        # column names
+        m = X.shape[1]
         if cols is not None:
             if len(set(cols)) != len(cols):
                 raise ValueError("Columns contain duplicate names.")
@@ -97,6 +100,15 @@ class OGDLR(object):
             # generate generic column names
             s1 = "col{0:0%dd}" % len(str(m))
             self.cols = [s1.format(i) for i in range(m)]
+
+    def _initialize(self, X, cols):
+        """Initialize some required attributes on first call.
+        """
+        if self.ndims is None:
+            self._initialize_dicts()
+        else:
+            self._initialize_lists()
+        self._initialize_cols(X, cols)
         # Validation for each single iteration. Could be changed
         # to collection.deque if speed and size are an issue here.
         self.valid_history = []
@@ -121,9 +133,8 @@ class OGDLR(object):
 
     def _get_p(self, xt, wt=None):
         if wt is None:
-            wTx = sum(self._get_w(xt))
-        else:
-            wTx = sum(wt)
+            wt = self._get_w(xt)
+        wTx = sum(wt)
         # bounded sigmoid
         wTx = max(min(wTx, 20.), -20.)
         return sigmoid(wTx)
@@ -132,9 +143,9 @@ class OGDLR(object):
         numt = [self.num.get(xi, 0.) for xi in xt]
         return numt
 
-    def _get_delta_num(self, grad_sq):
+    def _get_delta_num(self, grad):
         if self.alr_schedule == 'gradient':
-            return grad_sq
+            return grad * grad
         elif self.alr_schedule == 'count':
             return 1
         elif self.alr_schedule == 'constant':
@@ -145,18 +156,19 @@ class OGDLR(object):
 
     def _get_grads(self, yt, pt, wt):
         # Get the gradient as a function of true value and predicted
-        # probability, as well as the regularization terms. The 
+        # probability, as well as the regularization terms. The
         # gradient is the derivative of the cost function with
         # respect to each wi.
         y_err = pt - yt
-        grads = [y_err + self._get_regularization(wi) for wi in wt]
+        costs = self._get_regularization(wt)
+        grads = [y_err + cost for cost in costs]
         return grads
 
-    def _get_regularization(self, wi):
+    def _get_regularization(self, wt):
         # get cost from L1 and L2 regularization
-        cost = self.lambda1 * np.sign(wi)  # L1
-        cost += 2 * self.lambda2 * wi  # L2
-        return cost
+        costs = self.lambda1 * np.sign(wt)  # L1
+        costs += 2 * self.lambda2 * np.array(wt)  # L2
+        return costs
 
     def _get_skip_sample(self, class_weight, y):
         if class_weight == 'auto':
@@ -186,12 +198,15 @@ class OGDLR(object):
         # same
         numt = self._get_num(xt)
         for xi, numi, gradi in zip(xt, numt, gradt):
-            delta_w = gradi * self.alpha / (self.beta + np.sqrt(numi)) 
+            delta_w = gradi * self.alpha / (self.beta + np.sqrt(numi))
             delta_w /= sample_weight
             self.w[xi] = self.w.get(xi, 0.) - delta_w
-            delta_num = self._get_delta_num(gradi * gradi)
+            delta_num = self._get_delta_num(gradi)
             self.num[xi] = numi + delta_num
         return self
+
+    def _update_valid(self, yt, pt):
+        self.valid_history.append((yt, pt))
 
     def fit(self, X, y, cols=None, class_weight=1.):
         """Fit OGDLR model.
@@ -244,7 +259,7 @@ class OGDLR(object):
             pt = self._get_p(xt, wt)
             gradt = self._get_grads(yt, pt, wt)
             self._update(wt, xt, gradt, sample_weight)
-            self.valid_history.append((yt, pt))
+            self._update_valid(yt, pt)
             self._call_back(t)
 
     def predict_proba(self, X):
@@ -334,7 +349,7 @@ class OGDLR(object):
         wt = self._get_w(xt)
         pt = self._get_p(0, wt)
         grad = self._get_grads(y, pt, wt)
-        
+
         # numeric: vary each wi
         grad_num = []
         for i in range(len(wt)):
@@ -447,7 +462,7 @@ class FTRLprox(OGDLR):
                 wi = (np.sign(wi) * self.lambda1 - wi) / temp
                 wt.append(wi)
         return wt
-        
+
     def _get_grads(self, yt, pt, wt):
         # Get the gradient as a function of true value and predicted
         # probability. Regularization does not apply here since it is
@@ -459,7 +474,7 @@ class FTRLprox(OGDLR):
     def _update(self, wt, xt, grad, sample_weight):
         grad_sq = grad * grad
         numt = self._get_num(xt)
-        delta_num = self._get_delta_num(grad_sq)
+        delta_num = self._get_delta_num(grad)
         for xi, wi, numi in zip(xt, wt, numt):
             new_num = numi + delta_num
             # sigma = 1/eta(t) - 1/eta(t-1)

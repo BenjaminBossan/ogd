@@ -210,7 +210,7 @@ def test_get_delta_num(alr, expected):
     clf = OGDLR(alr_schedule=alr)
     clf.fit(X[:100], y[:100])
     result = clf._get_delta_num(1.23)
-    assert result == expected
+    assert result == expected ** 2
 
 
 def test_alr_schedule_error():

@@ -2,9 +2,10 @@
 
 from __future__ import division
 
-import scipy as sp
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import scipy as sp
+from scipy.special import expit
 
 
 def logloss(y_true, y_pred):
@@ -23,7 +24,8 @@ def logloss(y_true, y_pred):
 
 
 def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+    return expit(x)
+    # return 1 / (1 + np.exp(-x))
 
 
 class GetList(list):
