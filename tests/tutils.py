@@ -10,6 +10,7 @@ from FTRLprox.models import FTRLprox
 from FTRLprox.models import OGDLR
 from FTRLprox.models import SEED
 from FTRLprox.utils import logloss
+from FTRLprox.neuralnet import Neuralnet
 
 
 def create_training_data(n=10000):
@@ -65,3 +66,11 @@ hash_before.fit(X[:10], y[:10], COLS)
 hash_after = OGDLR(lambda1=LAMBDA1, alpha=ALPHA,
                    alr_schedule='constant', ndims=NDIMS)
 hash_after.fit(X, y, COLS)
+
+nn_before = Neuralnet(lambda1=LAMBDA1, lambda2=LAMBDA2, alpha=ALPHA, beta=1,
+                      alr_schedule='constant', num_units=16)
+nn_before.fit(X[:10], y[:10], COLS)
+
+nn_after = Neuralnet(lambda1=LAMBDA1, lambda2=LAMBDA2, alpha=ALPHA, beta=1,
+                     alr_schedule='constant', num_units=16)
+nn_after.fit(X, y, COLS)
