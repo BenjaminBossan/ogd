@@ -1,484 +1,316 @@
-""" Follow the (proximally) Regularized Leader model.
-
-FTRL proximal according to: McMahan et al. 2013:
-Ad click prediction: a view from the trenches.
-
-'OGDLR' model adapted from Sam Hocevar's:
-https://www.kaggle.com/c/criteo-display-ad-challenge/forums/t/10322/beat-the-benchmark-with-less-then-200mb-of-memory
-
-"""
-
 # -*- coding: utf-8 -*-
 
 from __future__ import division
 
+from itertools import permutations
+from mock import MagicMock
+from mock import patch
+
 import numpy as np
-from sklearn.utils.murmurhash import murmurhash3_32 as mmh
-
-from utils import GetList
-from utils import logloss
-from utils import sigmoid
-
-
-SEED = 17411
-np.random.seed(seed=SEED)
-
-
-class OGDLR(object):
-    """Online Gradient Descent Logistic Regression
-
-    Model adapted from Sam Hocevar with interface similar to scikit
-    learn's.
-
-    Only support for single class prediction right now.
-    The model supports per coordinate learning rate schedules.
-
-    """
-    def __init__(self,
-                 lambda1=0.,
-                 lambda2=0.,
-                 alpha=0.02,
-                 beta=1.,
-                 ndims=None,
-                 alr_schedule='gradient',
-                 callback=None,
-                 callback_period=10000,
-                 verbose=False):
-        """Parameters
-        ----------
-        * lambda1 (float, default: 1.): L1 regularization factor
-        * lambda2 (float, default: 0.): L2 regularization factor
-        * alpha (float, default: 0.02): scales learning rate up
-        * beta (float, default: 1.): scales learning rate down
-        * ndims (int, default: None): Max number of dimensions (use array),
-          if None, no max (use dict)
-        * alr_schedule (string, {'gradient' (default), 'count', 'constant'}):
-          adaptive learning rate schedule, either decrease with gradient
-          or with count or remain constant.
-        * callback (func, default: None): optional callback function
-        * callback_period (int, default: 10000): period of the callback
-        * verbose: not much here yet
-
-        Notes on parameter choice:
-        * alpha must be greater 0.
-        * "The optimal value of alpha can vary a fair bit..."
-        * "beta=1 is usually good enough; this simply ensures that early
-        learning rates are not too high"
-        -- McMahan et al.
-
-        """
-        self.lambda1 = lambda1
-        self.lambda2 = lambda2
-        self.alpha = alpha
-        self.beta = beta
-        self.ndims = ndims
-        self.alr_schedule = alr_schedule
-        self.callback = callback
-        self.callback_period = callback_period
-        self.verbose = verbose
-
-    def _initialize_dicts(self):
-        # weights and number of iterations (more or less) for adaptive
-        # learning rate
-        self.w = {}
-        self.num = {}
-
-    def _initialize_lists(self):
-        # weights and number of iterations (more or less) for adaptive
-        # learning rate
-        self.w = GetList([0.] * self.ndims)
-        self.num = GetList([0.] * self.ndims)
-
-    def _initialize_cols(self, X, cols):
-        # column names
-        m = X.shape[1]
-        if cols is not None:
-            if len(set(cols)) != len(cols):
-                raise ValueError("Columns contain duplicate names.")
-            self.cols = cols  # name of the columns
-        else:
-            # generate generic column names
-            s1 = "col{0:0%dd}" % len(str(m))
-            self.cols = [s1.format(i) for i in range(m)]
-
-    def _initialize(self, X, cols):
-        """Initialize some required attributes on first call.
-        """
-        if self.ndims is None:
-            self._initialize_dicts()
-        else:
-            self._initialize_lists()
-        self._initialize_cols(X, cols)
-        # Validation for each single iteration. Could be changed
-        # to collection.deque if speed and size are an issue here.
-        self.valid_history = []
-        self._is_initialized = True
-
-    def _get_x(self, xt):
-        # 'BIAS' is the bias term.  The other keys are created as a
-        # the column name joined with the value itself. This should
-        # ensure unique keys.
-        if self.ndims is None:
-            x = ['BIAS'] + ['__'.join((col, str(val))) for col, val
-                            in zip(self.cols, xt)]
-        else:
-            x = [mmh('BIAS', seed=SEED) % self.ndims]
-            x += [mmh(key + '__' + str(val), seed=SEED) % self.ndims
-                  for key, val in zip(self.cols, xt)]
-        return x
-
-    def _get_w(self, xt):
-        wt = [self.w.get(xi, 0.) for xi in xt]
-        return wt
-
-    def _get_p(self, xt, wt=None):
-        if wt is None:
-            wt = self._get_w(xt)
-        wTx = sum(wt)
-        # bounded sigmoid
-        wTx = max(min(wTx, 20.), -20.)
-        return sigmoid(wTx)
-
-    def _get_num(self, xt):
-        numt = [self.num.get(xi, 0.) for xi in xt]
-        return numt
-
-    def _get_delta_num(self, grad):
-        if self.alr_schedule == 'gradient':
-            return grad * grad
-        elif self.alr_schedule == 'count':
-            return 1
-        elif self.alr_schedule == 'constant':
-            return 0
-        else:
-            raise TypeError("Do not know adaptive learning"
-                            "rate schedule %s" % self.alr_schedule)
-
-    def _get_grads(self, yt, pt, wt):
-        # Get the gradient as a function of true value and predicted
-        # probability, as well as the regularization terms. The
-        # gradient is the derivative of the cost function with
-        # respect to each wi.
-        y_err = pt - yt
-        costs = self._get_regularization(wt)
-        grads = [y_err + cost for cost in costs]
-        return grads
-
-    def _get_regularization(self, wt):
-        # Get cost from L1 and L2 regularization. Currently, bias is
-        # also regularized but should not matter much.
-        costs = self.lambda1 * np.sign(wt)  # L1
-        costs += 2 * self.lambda2 * np.array(wt)  # L2
-        return costs
-
-    def _get_skip_sample(self, class_weight, y):
-        if class_weight == 'auto':
-            class_weight = np.mean(y) / (1 - np.mean(y))
-        if class_weight != 1.:
-            rand = np.random.random(len(y))
-            skip_sample = rand > class_weight
-            skip_sample[np.array(y) == 1] = False  # don't skip 1 labels
-            if self.verbose:
-                print("Using {:0.3f}% of negative samples".format(
-                    100 * class_weight))
-        else:
-            skip_sample = [False] * len(y)
-        return skip_sample
-
-    def _call_back(self, t):
-        if (
-                (t % self.callback_period == 0) &
-                (self.callback is not None) &
-                (t != 0)
-        ):
-            self.callback.plot(self)
-
-    def _update(self, wt, xt, gradt, sample_weight):
-        # note: wt is not used here but is still passed so that the
-        # interface for FTRL proximal (which requires wt) can stay the
-        # same
-        numt = self._get_num(xt)
-        for xi, numi, gradi in zip(xt, numt, gradt):
-            delta_w = gradi * self.alpha / (self.beta + np.sqrt(numi))
-            delta_w /= sample_weight
-            self.w[xi] = self.w.get(xi, 0.) - delta_w
-            delta_num = self._get_delta_num(gradi)
-            self.num[xi] = numi + delta_num
-        return self
-
-    def _update_valid(self, yt, pt):
-        self.valid_history.append((yt, pt))
-
-    def fit(self, X, y, cols=None, class_weight=1.):
-        """Fit OGDLR model.
-
-        Can also be used as if 'partial_fit', i.e. calling 'fit' more
-        than once continues with the learned weights.
-
-        Parameters
-        ----------
-
-        X : numpy.array, shape = [n_samples, n_features]
-          Training data
-
-        y : numpy.array, shape = [n_samples]
-          Target values
-
-        cols : list of strings, shape = [n_features] (default : None)
-          The name of the columns used for training. They are used as
-          part of the first part of the key. If None is given, give
-          generic names to columns ('col01', 'col02', etc.)
-
-        class_weight : float or 'auto' (optional, default=1.0)
-          Subsample the negative class. Assumes that classes are {0,
-          1} and that the negative (0) class is the more common
-          one. If these assumptions are not met, don't change this
-          parameter.
-
-        Returns
-        -------
-
-        self
-
-        """
-        if not hasattr(self, '_is_initialized'):
-            self._initialize(X, cols)
-        # skip samples if class weight is given
-        skip_sample = self._get_skip_sample(class_weight, y)
-
-        n = X.shape[0]
-        for t in range(n):
-            # if classes weighted differently
-            if skip_sample[t]:
-                continue
-            else:
-                sample_weight = 1. if y[t] == 1 else class_weight
-
-            yt = y[t]
-            xt = self._get_x(X[t])
-            wt = self._get_w(xt)
-            pt = self._get_p(xt, wt)
-            gradt = self._get_grads(yt, pt, wt)
-            self._update(wt, xt, gradt, sample_weight)
-            self._update_valid(yt, pt)
-            self._call_back(t)
-
-    def predict_proba(self, X):
-        """ Predict probability for class 1.
-
-        Parameters
-        ----------
-
-        X : numpy.array, shape = [n_samples, n_features]
-          Samples
-
-        Returns
-        -------
-
-        y_prob : array, shape = [n_samples]
-          Predicted probability for class 1
-        """
-        X = [self._get_x(xt) for xt in X]
-        pt = [self._get_p(xt) for xt in X]
-        y_prob = np.array(pt)
-        return y_prob
-
-    def predict(self, X):
-        """ Predict class label for samples in X.
-
-        Parameters
-        ----------
-
-        X : numpy.array, shape = [n_samples, n_features]
-          Samples
-
-        Returns
-        -------
-
-        y_pred : array, shape = [n_samples]
-          Predicted class label per sample.
-        """
-        pt = self.predict_proba(X)
-        y_pred = (pt > 0.5).astype(int)
-        return y_pred
-
-    def _cost_function(self, xt, wt, y):
-        pt = self._get_p(xt, wt)
-        ll = logloss([y], [pt])
-        l1 = self.lambda1 * np.abs(wt)
-        l2 = self.lambda2 * (np.array(wt) ** 2)
-        J = ll + l1 + l2
-        return J
-
-    def numerical_grad(self, x, y, epsilon=1e-9):
-        """Calculate the gradient and the gradient determined
-        numerically; they should be very close.
-
-        Use this function to verify that the gradient is determined
-        correctly. The fit method needs to be called once before this
-        method may be invoked.
-
-        Parameters
-        ----------
-        x : list of strings
-          The keys; just a single row.
-
-        y : int
-          The target to be predicted.
-
-        epsilon : float (default: 1e-6)
-          The shift applied to the weights to determine the numerical
-          gradient. A small but not too small value such as the
-          default should do the job.
-
-        Returns
-        -------
-
-        grad : float
-          The gradient as determined by this class. For cross-entropy,
-          this is simply the prediction minus the true value.
-
-        grad_num : float
-
-          The gradient as determined numerically.
-
-        """
-        # analytic
-        xt = self._get_x(x)
-        wt = self._get_w(xt)
-        pt = self._get_p(xt, wt)
-        grad = self._get_grads(y, pt, wt)
-
-        # numeric: vary each wi
-        grad_num = []
-        for i in range(len(wt)):
-            wt_pe, wt_me = wt[:], wt[:]
-            wt_pe[i] += epsilon
-            wt_me[i] -= epsilon
-            cost_pe = self._cost_function(xt, wt_pe, y)[i]
-            cost_me = self._cost_function(xt, wt_me, y)[i]
-            grad_num.append((cost_pe - cost_me) / 2 / epsilon)
-        return grad, grad_num
-
-    def keys(self):
-        """Return the keys saved by the model.
-
-        This only works if the model uses the dictionary method for
-        storing its keys and values. Otherwise, it returns None.
-
-        Returns
-        -------
-
-        keys : None or list of strings
-          The keys of the model if they can be retrieved else None.
-        """
-        if self.ndims is None:
-            return self.w.keys()
-        else:
-            return None
-
-    def weights(self):
-        """Return the weights saved by the model.
-
-        The weights are not necessarily the same as in the 'w'
-        attribute.
-
-        Returns
-        -------
-        weights : None or list of floats
-          The weights of the model. If the model uses a dictionary for
-          storing the weights, they are returned in the same order as
-          the keys. If the model uses hashing to a list to store the
-          weights, returns None.
-
-        """
-        if self.ndims is None:
-            weights = self._get_w(self.keys())
-            return weights
-        else:
-            return None
-
-
-class FTRLprox(OGDLR):
-    """FTRL proximal model.
-
-    Only support for single class prediction right now.
-    The model supports per coordinate learning rate schedules.
-    """
-    def __init__(self,
-                 lambda1=1.,
-                 lambda2=0.,
-                 alpha=0.02,
-                 beta=1.,
-                 ndims=None,
-                 alr_schedule='gradient',
-                 callback=None,
-                 callback_period=10000,
-                 verbose=False):
-        """Parameters
-        ----------
-        * lambda1 (float, default: 1.): L1 regularization factor
-        * lambda2 (float, default: 0.): L2 regularization factor
-        * alpha (float, default: 0.02): scales learning rate up
-        * beta (float, default: 1.): scales learning rate down
-        * ndims (int, default: None): Max number of dimensions (use array),
-          if None, no max (use dict)
-        * alr_schedule (string, {'gradient' (default), 'count', 'constant'}):
-          adaptive learning rate schedule, either decrease with gradient
-          or with count or remain constant.
-        * callback (func, default: None): optional callback function
-        * callback_period (int, default: 10000): period of the callback
-        * verbose: not much here yet
-
-        Notes on parameter choice:
-        * alpha must be greater 0.
-        * "The optimal value of alpha can vary a fair bit..."
-        * "beta=1 is usually good enough; this simply ensures that early
-        learning rates are not too high"
-        -- McMahan et al.
-
-        """
-        self.lambda1 = lambda1
-        self.lambda2 = lambda2
-        self.alpha = alpha
-        self.beta = beta
-        self.ndims = ndims
-        self.alr_schedule = alr_schedule
-        self.callback = callback
-        self.callback_period = callback_period
-        self.verbose = verbose
-
-    def _get_w(self, xt):
-        wt = []
-        for xi in xt:
-            wi = self.w.get(xi, 0.)
-            if abs(wi) <= self.lambda1:
-                wt.append(0.)
-            else:
-                num = self.num.get(xi, 0.)
-                eta = self.alpha / (self.beta + np.sqrt(num))
-                temp = 1 / eta + self.lambda2
-                wi = (np.sign(wi) * self.lambda1 - wi) / temp
-                wt.append(wi)
-        return wt
-
-    def _get_grads(self, yt, pt, wt):
-        # Get the gradient as a function of true value and predicted
-        # probability. Regularization does not apply here since it is
-        # realized differently for FTRLprox, but 'wt' is still passed
-        # for consistency.
-        y_err = pt - yt
-        return y_err
-
-    def _update(self, wt, xt, grad, sample_weight):
-        grad_sq = grad * grad
-        numt = self._get_num(xt)
-        delta_num = self._get_delta_num(grad)
-        for xi, wi, numi in zip(xt, wt, numt):
-            new_num = numi + delta_num
-            # sigma = 1/eta(t) - 1/eta(t-1)
-            sigma = (np.sqrt(new_num) - np.sqrt(numi)) / self.alpha
-            delta_w = (wi * sigma - grad) / sample_weight
-            self.w[xi] = self.w.get(xi, 0.) - delta_w
-            self.num[xi] = new_num
-        return self
+import pytest
+from sklearn.utils import murmurhash3_32 as mmh
+
+from FTRLprox.models import FTRLprox
+from FTRLprox.models import OGDLR
+from FTRLprox.models import SEED
+from FTRLprox.utils import logloss
+from FTRLprox.utils import GetList
+from tutils import ftrl_after
+from tutils import ftrl_before
+from tutils import hash_after
+from tutils import hash_before
+from tutils import ogdlr_after
+from tutils import ogdlr_before
+from tutils import N
+from tutils import NDIMS
+from tutils import X
+from tutils import y
+
+
+def test_keys_dictionary():
+    ogdlr_keys = ogdlr_after.keys()
+    ftrl_keys = ftrl_after.keys()
+    assert ogdlr_keys == ftrl_keys
+    known_keys = set(['BIAS', 'weather__rainy', 'weather__sunny',
+                      'temperature__cold', 'temperature__warm'])
+    assert known_keys <= set(ftrl_keys)
+
+
+def test_keys_list():
+    assert hash_after.keys() is None
+
+
+def test_weights():
+    ogdlr_weights = ogdlr_after.weights()
+    ftrl_weights = ftrl_after.weights()
+    hash_keys = [mmh(key, seed=SEED) % NDIMS for key in ftrl_after.keys()]
+    hash_weights = hash_after._get_w(hash_keys)
+
+    assert np.allclose(ogdlr_weights, ftrl_weights)
+    assert np.allclose(hash_weights, ftrl_weights)
+
+
+def test_weights_list():
+    assert hash_after.weights() is None
+
+
+@pytest.mark.parametrize('alr', [
+    'gradient',
+    'count',
+    'constant',
+])
+def test_ogdlr_grad_numerically(alr):
+    epsilon = 1e-6
+    clf = OGDLR(alr_schedule=alr)
+    clf.fit(X[:100], y[:100])
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
+
+
+@pytest.mark.parametrize('lambda1', [0, 0.1, 1, 10, 100])
+def test_ogdlr_grad_numerically_l1(lambda1):
+    epsilon = 1e-6
+    clf = OGDLR(lambda1=lambda1)
+    clf.fit(X[:100], y[:100])
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
+
+
+@pytest.mark.parametrize('lambda2', [0, 0.1, 1, 10, 100])
+def test_ogdlr_grad_numerically_l2(lambda2):
+    epsilon = 1e-6
+    clf = OGDLR(lambda2=lambda2)
+    clf.fit(X[:100], y[:100])
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
+
+
+@pytest.mark.parametrize('args',
+    list(set(permutations(2 * [0] + 2 * [1e-4] + 2 * [1e-2] + 2 * [1], 2)))
+)
+def test_ogdlr_grad_numerically_l1_l2(args):
+    # test all combinations of lambda1 and lambda2 values of 0,
+    # 0.5, and 2 and for alpha = 0.02 and beta = 1.
+    epsilon = 1e-6
+    clf = OGDLR(*args)
+    clf.fit(X[:100], y[:100])
+    close = []
+    for xx, yy in zip(X[:10], y[:10]):
+        grad, grad_num = clf.numerical_grad(xx, yy, epsilon)
+        assert np.allclose(grad, grad_num, atol=epsilon)
+
+
+@pytest.mark.parametrize('arg, expected', [
+    (None, dict),
+    (123, list),
+    (123, GetList),
+])
+def test_ogdlr_init_ndims(arg, expected):
+    clf = OGDLR(ndims=arg)
+    clf.fit(X[:10], y[:10])
+    assert isinstance(clf.w, expected)
+    assert isinstance(clf.num, expected)
+
+
+def test_ogdlr_init_cols():
+    # case where cols are given
+    assert ogdlr_after.cols == ['weather', 'temperature', 'noise']
+
+    clf = OGDLR()
+    clf.fit(X[:10], y[:10])
+    # creates default cols 0 ... 2
+    assert clf.cols == ['col0', 'col1', 'col2']
+
+    clf.fit(X[:10], y[:10], cols=['a', 'b', 'c'])
+    # cols do not change
+    assert clf.cols == ['col0', 'col1', 'col2']
+
+    clf = OGDLR()
+    clf.fit(np.random.random((10, 25)), y[:10])
+    # creates cols 01 ... 24
+    assert clf.cols[0] == 'col00'
+    assert clf.cols[13] == 'col13'
+    assert clf.cols[-1] == 'col24'
+
+    # column names must be unique
+    with pytest.raises(ValueError):
+        clf = OGDLR()
+        clf.fit(X[:10], y[:10], cols=['1', '2', '1'])
+
+
+def test_get_x():
+    # if using list, get_x should get ints
+    clf = OGDLR(ndims=100)
+    clf.fit(X[:100], y[:100])
+    xt = ['sunny', 'cold', X[0, 2]]
+    result = clf._get_x(xt)
+    assert all([isinstance(r, int) for r in result])
+
+    # if using dict, get_x should give dictionary keys
+    xt = ['sunny', 'cold', X[0, 2]]
+    result = ogdlr_after._get_x(xt)
+    expected = ['BIAS',
+                'weather__sunny',
+                'temperature__cold',
+                'noise__' + X[0, 2]]
+    assert result == expected
+
+
+@pytest.mark.parametrize('clf, key, expected', [
+    (ogdlr_after, ogdlr_after.w.keys()[0],
+     ogdlr_after.w.values()[0]),
+    (ogdlr_after, ogdlr_after.w.keys()[-1],
+     ogdlr_after.w.values()[-1]),
+    (ogdlr_after, 'key-not-present', 0.)
+])
+def test_get_w(clf, key, expected):
+    result = clf._get_w([key])[0]
+    assert result == expected
+
+
+def test_get_p():
+    # probabilities are between 0 and 1
+    Xs = [ogdlr_after._get_x(x) for x in X]
+    prob = [ogdlr_after._get_p(xt) for xt in Xs]
+    assert all([0 < pr < 1 for pr in prob])
+
+
+def test_get_num_count():
+    # if adaptive learning rate is constant, all nums should be 0
+    assert all(np.array(ogdlr_after.num.values()) == 0)
+
+    # if adaptive learning rate by counting, all nums should be
+    # integers from 0 to number of examples + 1 (from bias)
+    clf = OGDLR(alr_schedule='count')
+    clf.fit(X[:100], y[:100])
+    assert clf.num['BIAS'] == 100  # bias term
+    result = set(clf.num.values()) - set(range(N + 1))
+    assert result == set([])
+
+    clf = OGDLR(alr_schedule='gradient')
+    clf.fit(X[:100], y[:100])
+    # if adaptive learning rate by gradient, all nums should be floats
+    result = clf.num.values()
+    assert all([isinstance(ni, float) for ni in result])
+
+
+def test_w_and_num_keys():
+    assert ogdlr_after.w.keys() == ogdlr_after.num.keys()
+
+
+@pytest.mark.parametrize('alr, expected', [
+    ('gradient', 1.23),
+    ('count', 1),
+    ('constant', 0),
+])
+def test_get_delta_num(alr, expected):
+    clf = OGDLR(alr_schedule=alr)
+    clf.fit(X[:100], y[:100])
+    result = clf._get_delta_num(1.23)
+    assert result == expected ** 2
+
+
+def test_alr_schedule_error():
+    clf = OGDLR(alr_schedule='nonsense')
+    with pytest.raises(TypeError):
+        clf.fit(X[:10], y[:10])
+
+
+@pytest.mark.parametrize('class_weight, y, expected', [
+    ('auto', [0, 0, 0, 1], [True, True, False, False]),
+    ('auto', [0, 0, 1, 1], [False, False, False, False]),
+    (1 / 4, [0, 0, 0, 1], [True, True, False, False]),
+    (1 / 2, [0, 0, 1, 1], [True, False, False, False]),
+    (4 / 5, [0, 0, 1, 1], [False, False, False, False]),
+    (1 / 100, [1, 0, 1, 0], [False, True, False, True]),
+    (1., [0, 0, 0, 0], [False, False, False, False]),
+    (1., [0, 1, 0, 1], [False, False, False, False]),
+])
+def test_get_skip_sample(class_weight, y, expected):
+    with patch('FTRLprox.models.np.random.random') as rand:
+        rand.return_value = np.array([3/4, 1/2, 1/4, 1/2])
+        skip_sample = ogdlr_after._get_skip_sample(class_weight, y)
+        assert (np.array(skip_sample) == expected).all()
+
+
+@pytest.mark.parametrize('callback_period', [
+    (1000),
+    (2345),
+    (10000),
+])
+def test_callback_count(callback_period):
+    mock_cb = MagicMock()
+    mock_cb.plot = MagicMock(return_value=0)
+    clf = OGDLR(callback=mock_cb, callback_period=callback_period)
+    clf.fit(X, y)
+    expected = (N - 1) // callback_period
+    result = mock_cb.plot.call_count
+    assert result == expected
+
+
+@pytest.mark.parametrize('n_samples', [
+    1,
+    123,
+    456,
+])
+def test_valid_history(n_samples):
+    clf = OGDLR()
+    clf.fit(X[:n_samples], y[:n_samples])
+
+    # validation history as long as training
+    assert len(clf.valid_history) == n_samples
+    y_true, y_prob = zip(*clf.valid_history)
+    # all true values 0 or 1
+    assert set(y_true) <= set([0, 1])
+    # all y_probs are probabilities
+    assert all([isinstance(pr, float) for pr in y_prob])
+
+
+@pytest.mark.parametrize('n_samples', [
+    1,
+    123,
+    456,
+])
+def test_predict_proba(n_samples):
+    y_prob = ogdlr_after.predict_proba(X[:n_samples])
+    assert len(y_prob) == n_samples
+    assert all([isinstance(pr, float) for pr in y_prob])
+
+
+@pytest.mark.parametrize('n_samples', [
+    1,
+    123,
+    456,
+])
+def test_predict(n_samples):
+    y_pred = ogdlr_after.predict(X[:n_samples])
+    assert len(y_pred) == n_samples
+    assert set(y_pred) <= set([0, 1])
+
+
+@pytest.mark.parametrize('skip_list, count', [
+    ([True, False] * 50, 50),
+    ([True, True, False] * 20, 20),
+    ([True] * 123, 0),
+    ([False] * 456, 456),
+])
+def test_fit_skip_sample(skip_list, count):
+    with patch('FTRLprox.models.OGDLR._get_skip_sample') as skip:
+        skip.return_value = skip_list
+        with patch('FTRLprox.models.OGDLR._update') as update:
+            n_samples = len(skip_list)
+            clf = OGDLR()
+            clf.fit(X[:n_samples], y[:n_samples])
+            assert update.call_count == count
+
+
+def test_fit_dont_skip_1():
+    # if all is skipped, the call count should equal the number of 1's
+    # in y
+    with patch('FTRLprox.models.OGDLR._update') as update:
+        clf = OGDLR()
+        clf.fit(X, y, class_weight=0.)
+        assert update.call_count == sum(y)
