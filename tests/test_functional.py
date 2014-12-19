@@ -15,6 +15,8 @@ from tutils import ftrl_before
 from tutils import ftrl_after
 from tutils import hash_before
 from tutils import hash_after
+from tutils import nn_before
+from tutils import nn_after
 from tutils import X
 from tutils import y
 
@@ -51,15 +53,27 @@ def test_ogdlr_with_hash_learns():
     assert ll_before > ll_after
 
 
+def test_nn_learns():
+    # test that this model learns something
+    y_pred = nn_before.predict_proba(X)
+    ll_before = logloss(y, y_pred)
+
+    y_pred = nn_after.predict_proba(X)
+    ll_after = logloss(y, y_pred)
+
+    assert ll_before > ll_after
+
+
 def test_models_same_predictions():
     # for lambda1, lambda2 = 0, OGDLR and FTRLprox should generate the
     # same result. The same goes if hashing is used (except for the
-    # rare case of hash collisions.
-    y_f = ftrl_after.predict(X)
-    y_o = ogdlr_after.predict(X)
-    y_h = hash_after.predict(X)
-    assert sum(y_f != y_o) == 0
-    assert sum(y_f != y_h) == 0
+    # rare case of hash collisions. A neural net does not necessarily
+    # predict exactly the same outcome.
+    y_f = ftrl_after.predict_proba(X)
+    y_o = ogdlr_after.predict_proba(X)
+    y_h = hash_after.predict_proba(X)
+    assert np.allclose(y_f, y_o, atol=1e-15)
+    assert np.allclose(y_f, y_h, atol=1e-15)
 
 
 def test_effect_of_alpha():
@@ -106,7 +120,7 @@ def test_effect_of_lambda2(lambda2):
     weights = range(-5, 0) + range(1, 6)
     clf = OGDLR(lambda2=lambda2)
     grads = clf._get_grads(0, 0, weights)
-    # gradient only depends on sign of weight
+    # gradient is proportional to weights
     frac = [gr / w for gr, w in zip(grads, weights)]
     assert np.allclose(frac[0], frac)
 

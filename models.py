@@ -151,7 +151,7 @@ class OGDLR(object):
         elif self.alr_schedule == 'constant':
             return 0
         else:
-            raise TypeError("Do not know adaptive learning"
+            raise TypeError("Do not know learning"
                             "rate schedule %s" % self.alr_schedule)
 
     def _get_grads(self, yt, pt, wt):
@@ -165,7 +165,8 @@ class OGDLR(object):
         return grads
 
     def _get_regularization(self, wt):
-        # get cost from L1 and L2 regularization
+        # Get cost from L1 and L2 regularization. Currently, bias is
+        # also regularized but should not matter much.
         costs = self.lambda1 * np.sign(wt)  # L1
         costs += 2 * self.lambda2 * np.array(wt)  # L2
         return costs
@@ -301,14 +302,12 @@ class OGDLR(object):
         y_pred = (pt > 0.5).astype(int)
         return y_pred
 
-    def _cost_function(self, wt, y):
-        pt = self._get_p(0, wt)
+    def _cost_function(self, xt, wt, y):
+        pt = self._get_p(xt, wt)
         ll = logloss([y], [pt])
-        J = []
-        for wi in wt:
-            l1 = self.lambda1 * np.abs(wi)
-            l2 = self.lambda2 * wi * wi
-            J.append(ll + l1 + l2)
+        l1 = self.lambda1 * np.abs(wt)
+        l2 = self.lambda2 * (np.array(wt) ** 2)
+        J = ll + l1 + l2
         return J
 
     def numerical_grad(self, x, y, epsilon=1e-9):
@@ -347,7 +346,7 @@ class OGDLR(object):
         # analytic
         xt = self._get_x(x)
         wt = self._get_w(xt)
-        pt = self._get_p(0, wt)
+        pt = self._get_p(xt, wt)
         grad = self._get_grads(y, pt, wt)
 
         # numeric: vary each wi
@@ -356,8 +355,8 @@ class OGDLR(object):
             wt_pe, wt_me = wt[:], wt[:]
             wt_pe[i] += epsilon
             wt_me[i] -= epsilon
-            cost_pe = self._cost_function(wt_pe, y)[i]
-            cost_me = self._cost_function(wt_me, y)[i]
+            cost_pe = self._cost_function(xt, wt_pe, y)[i]
+            cost_me = self._cost_function(xt, wt_me, y)[i]
             grad_num.append((cost_pe - cost_me) / 2 / epsilon)
         return grad, grad_num
 
