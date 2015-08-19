@@ -15,4 +15,4 @@ Some features:
 
 All this is work in progress, use at your own risk.
 
-For paper, see (here)[http://www.eecs.tufts.edu/~dsculley/papers/ad-click-prediction.pdf].
+For paper, see [here](http://www.eecs.tufts.edu/~dsculley/papers/ad-click-prediction.pdf).
