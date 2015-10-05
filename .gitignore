@@ -1,0 +1,6 @@
+ogd.egg-info/
+.coverage
+.ipynb_checkpoints
+*~
+*.pyc
+*.ipynb
