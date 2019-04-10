@@ -5,7 +5,7 @@ colorama=0.3.1=py27_0
 dateutil=2.1=py27_2
 ipython=2.3.0=py27_0
 ipython-notebook=2.3.0=py27_0
-jinja2=2.7.3=py27_1
+jinja2>=2.8.1=py27_1
 markupsafe=0.23=py27_0
 matplotlib=1.4.2=np19py27_0
 mock=1.0.1=py27_0
