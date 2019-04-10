@@ -1,5 +1,7 @@
 # FTRL proximal
 
+*Note*: This project is abandoned.
+
 Right now, this package includes Online Gradient Descent Logistic
 Regression (OGDLR) and Follow the (proximal) Regularized Leader
 (FTRLprox) algorithms.
